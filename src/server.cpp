@@ -7,6 +7,7 @@
 #include <fstream>
 #include <map>
 #include <vector>
+#include <thread>
 
 using namespace std;
 
@@ -200,6 +201,83 @@ string handle_post_request(const string &path, const string &body, const map<str
     return "<html><body><h1>POST endpoint not found</h1><p>Path: " + path + "</p><a href='/'>Go Back</a></body></html>";
 }
 
+void handle_client(int client_fd) {
+    char buffer[8192] = {0};
+    int bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+    if (bytes_read <= 0) {
+        close(client_fd);
+        return;
+    }
+
+    string request(buffer, bytes_read);
+    cout << "Request:\n" << request << "\n";
+
+    istringstream request_stream(request);
+    string method, path, http_version;
+    request_stream >> method >> path >> http_version;
+
+    string response_body;
+    string status_line;
+    string content_type;
+
+    if (method == "GET") {
+        if (path == "/") path = "/index.html";
+        string filename = "." + path;
+        response_body = read_file(filename);
+
+        if (response_body.empty()) {
+            status_line = "HTTP/1.1 404 Not Found\r\n";
+            response_body = "<h1>404 Not Found</h1>";
+            content_type = "text/html";
+        } else {
+            status_line = "HTTP/1.1 200 OK\r\n";
+            content_type = get_content_type(path);
+        }
+    } else if (method == "POST") {
+        auto headers = parse_headers(request);
+        string body = extract_body(request);
+        response_body = handle_post_request(path, body, headers);
+        status_line = "HTTP/1.1 200 OK\r\n";
+        content_type = (path == "/api/data") ? "application/json" : "text/html";
+    } else if (method == "PUT") {
+        string body = extract_body(request);
+        string filename = "." + path;
+        if (write_file(filename, body)) {
+            status_line = "HTTP/1.1 200 OK\r\n";
+            response_body = "<h1>PUT Success</h1>";
+        } else {
+            status_line = "HTTP/1.1 500 Internal Server Error\r\n";
+            response_body = "<h1>PUT Failed</h1>";
+        }
+        content_type = "text/html";
+    } else if (method == "DELETE") {
+        string filename = "." + path;
+        if (remove(filename.c_str()) == 0) {
+            status_line = "HTTP/1.1 200 OK\r\n";
+            response_body = "<h1>Deleted Successfully</h1>";
+        } else {
+            status_line = "HTTP/1.1 404 Not Found\r\n";
+            response_body = "<h1>File Not Found</h1>";
+        }
+        content_type = "text/html";
+    } else {
+        status_line = "HTTP/1.1 405 Method Not Allowed\r\n";
+        response_body = "<h1>405 Method Not Allowed</h1>";
+        content_type = "text/html";
+    }
+
+    string response = status_line +
+                      "Content-Type: " + content_type + "\r\n"
+                      "Content-Length: " + to_string(response_body.length()) + "\r\n"
+                      "Connection: close\r\n"
+                      "\r\n" +
+                      response_body;
+
+    send(client_fd, response.c_str(), response.length(), 0);
+    close(client_fd);
+}
+
+
 int main()
 {
     // 1. Create a socket
@@ -246,94 +324,12 @@ int main()
         if (client_fd < 0)
         {
             cerr << "Accept failed.\n";
-            continue; // Continue accepting other clients instead of exiting
-        }
-
-        // 6. Read request with larger buffer for POST data
-        char buffer[8192] = {0};
-        int bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
-        if (bytes_read <= 0)
-        {
-            close(client_fd);
             continue;
         }
 
-        string request(buffer, bytes_read);
-        cout << "Request:\n" << request << "\n";
-
-        // 7. Parse request line
-        istringstream request_stream(request);
-        string method, path, http_version;
-        request_stream >> method >> path >> http_version;
-
-        string response_body;
-        string status_line;
-        string content_type;
-
-        if (method == "GET")
-        {
-            // Convert / to /index.html
-            if (path == "/")
-                path = "/index.html";
-
-            // Remove leading /
-            string filename = "." + path;
-
-            response_body = read_file(filename);
-
-            if (response_body.empty())
-            {
-                status_line = "HTTP/1.1 404 Not Found\r\n";
-                response_body = "<h1>404 Not Found</h1>";
-                content_type = "text/html";
-            }
-            else
-            {
-                status_line = "HTTP/1.1 200 OK\r\n";
-                content_type = get_content_type(path);
-            }
-        }
-        else if (method == "POST")
-        {
-            // Parse headers
-            map<string, string> headers = parse_headers(request);
-            
-            // Extract body
-            string body = extract_body(request);
-            
-            // Handle POST request
-            response_body = handle_post_request(path, body, headers);
-            status_line = "HTTP/1.1 200 OK\r\n";
-            
-            // Set content type based on the endpoint
-            if (path == "/api/data")
-                content_type = "application/json";
-            else
-                content_type = "text/html";
-        }
-        else
-        {
-            status_line = "HTTP/1.1 405 Method Not Allowed\r\n";
-            response_body = "<h1>405 Method Not Allowed</h1>";
-            content_type = "text/html";
-        }
-
-        // 8. Build HTTP response
-        string response =
-            status_line +
-            "Content-Type: " + content_type + "\r\n"
-            "Content-Length: " + to_string(response_body.length()) + "\r\n"
-            "Connection: close\r\n"
-            "\r\n" +
-            response_body;
-
-        // 9. Send response
-        send(client_fd, response.c_str(), response.length(), 0);
-
-        // 10. Clean up
-        close(client_fd);
+        // Handle each client in a new thread
+        thread(handle_client, client_fd).detach();
     }
-
     close(server_fd);
     return 0;
 }
